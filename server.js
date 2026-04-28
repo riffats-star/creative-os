@@ -70,21 +70,20 @@ app.post("/api/apify", async (req, res) => {
 app.post("/api/windsor", async (req, res) => {
   const apiKey = process.env.WINDSOR_API_KEY;
   console.log("[Windsor] API key present:", !!apiKey);
-  console.log("[Windsor] API key length:", apiKey ? apiKey.length : 0);
   if (!apiKey) {
     console.log("[Windsor] No API key configured — skipping");
     return res.status(400).json({ error: "Windsor not configured" });
   }
   try {
-    const url = "https://connectors.windsor.ai/facebook?api_key=" + apiKey + "&date_preset=last_7d&fields=ad_name,spend,ctr,purchase_roas_omni_purchase&accounts=584820145452956";
+    const url = "https://connectors.windsor.ai/all?api_key=" + apiKey + "&date_preset=last_30d&fields=account_name,ad_name,spend,clicks,impressions,ctr,purchase_roas,purchases_conversion_value,omni_purchase_roas&data_source=facebook";
     console.log("[Windsor] Fetching:", url.replace(apiKey, "***"));
     const response = await fetch(url, { method: "GET" });
     console.log("[Windsor] HTTP status:", response.status);
     const text = await response.text();
-    console.log("[Windsor] Raw response (first 200 chars):", text.slice(0, 200));
+    console.log("[Windsor] Raw response (first 300 chars):", text.slice(0, 300));
     const data = JSON.parse(text);
-    const rows = Array.isArray(data) ? data : (data?.data || []);
-    console.log("[Windsor] Got " + rows.length + " rows, type: " + (Array.isArray(data) ? "array" : "object"));
+    const rows = Array.isArray(data) ? data : (data?.data || data?.results || []);
+    console.log("[Windsor] Got " + rows.length + " rows");
     res.json(rows);
   } catch (err) {
     console.error("[Windsor] Error:", err.message);
