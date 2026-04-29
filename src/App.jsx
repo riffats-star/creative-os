@@ -107,7 +107,7 @@ async function fetchWindsorData() {
 function parseCreativeAngles(rows) {
   if (!rows?.length) return null;
   const getRoas = r => r.purchase_roas || r.omni_purchase_roas || r.purchase_roas_omni_purchase || 0;
-  const withRoas = rows.filter(r => getRoas(r) > 0 && (r.spend||0) > 500);
+  const withRoas = rows.filter(r => getRoas(r) > 0);
   const sorted = [...withRoas].sort((a,b) => getRoas(b) - getRoas(a));
   const topPerformers = sorted.slice(0,5).map(r => {
     const parts = (r.ad_name||"").split("-").pop() || r.ad_name;

@@ -84,6 +84,7 @@ app.post("/api/windsor", async (req, res) => {
     const data = JSON.parse(text);
     const rows = Array.isArray(data) ? data : (data?.data || data?.results || []);
     console.log("[Windsor] Got " + rows.length + " rows");
+    if (rows.length > 0) console.log("[Windsor] First row keys/values:", JSON.stringify(rows[0]));
     res.json(rows);
   } catch (err) {
     console.error("[Windsor] Error:", err.message);
