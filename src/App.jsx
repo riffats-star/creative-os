@@ -22,9 +22,10 @@ const PIPELINE_STEPS = [
   { key:"tiktok",         label:"Scraping TikTok trends (auto)" },
   { key:"instagram",      label:"Scraping Instagram comments" },
   { key:"quora",          label:"Scraping Quora discussions (auto)" },
-  { key:"video_analysis", label:"Analysing winning ad videos" },
-  { key:"research",       label:"Building Research Intelligence — pain clusters & whitespace" },
-  { key:"brief",          label:"Generating deep ICP briefs" },
+  { key:"video_analysis",  label:"Analysing winning ad videos" },
+  { key:"creative_intel",  label:"Creative sheet × Windsor join — Vision AI tagging top 10" },
+  { key:"research",        label:"Building Research Intelligence — pain clusters & whitespace" },
+  { key:"brief",           label:"Generating deep ICP briefs" },
 ];
 
 const defaultProgress = Object.fromEntries(PIPELINE_STEPS.map(s => [s.key,"pending"]));
@@ -104,43 +105,216 @@ async function fetchWindsorData() {
   } catch(e) { console.error("Windsor fetch failed:",e); return null; }
 }
 
+function parseCreativeName(name) {
+  if (!name) return { cohort:"ACQ", format:"Static", product:"Other", contentType:"Tactical", creator:null };
+  const n = String(name);
+  const cohortMatch = n.match(/^(ACQ|RET|REM|ALWAYS_ON)/i);
+  const cohort = cohortMatch ? cohortMatch[1].toUpperCase() : "ACQ";
+  const afterDash = n.split("-")[1] || "";
+  const fmtMatch = afterDash.match(/^(video|static|carousel|reel|ugc|dpa)/i);
+  const fmt = fmtMatch ? fmtMatch[1] : null;
+  const format = fmt ? fmt.charAt(0).toUpperCase()+fmt.slice(1).toLowerCase()
+    : n.toLowerCase().includes("video") ? "Video"
+    : n.toLowerCase().includes("static") ? "Static"
+    : n.toLowerCase().includes("carousel") ? "Carousel" : "Static";
+  const products = ["LTC_Flare","LTC_USP","LTC_AMPM","LTC_Wide","BB_Str","BB_Fit","LTC_LiteFlare","TravelCollectionMP","LTC_Shorts","LTC_Tee","CloudSoft","Unstoppable","MoveEase","FlexShorts"];
+  let product = "Other";
+  for (const p of products) { if (n.includes(p)) { product = p; break; } }
+  const ctMap = { INF:"Influencer", CCP:"CCP", Tactical:"Tactical", WYLD:"WYLD", UGC:"UGC" };
+  let contentType = "Tactical";
+  for (const [k,v] of Object.entries(ctMap)) { if (n.includes("_"+k+"_")) { contentType = v; break; } }
+  const creatorMatch = n.match(/(?:INF|CCP)_([A-Za-z]+)_/);
+  const creator = creatorMatch ? creatorMatch[1] : null;
+  return { cohort, format, product, contentType, creator };
+}
+
 function parseCreativeAngles(rows) {
   if (!rows?.length) return null;
   const getRoas = r => {
-    const direct = r.purchase_roas || r.omni_purchase_roas || r.purchase_roas_omni_purchase || r.website_purchase_roas || r.roas || 0;
+    const direct = r.website_purchase_roas || r.purchase_roas || r.omni_purchase_roas || r.purchase_roas_omni_purchase || r.roas || 0;
     if (direct > 0) return direct;
-    // Compute from conversion value / spend when ROAS fields are null
-    if (r.purchases_conversion_value > 0 && r.spend > 0) return r.purchases_conversion_value / r.spend;
+    const val = r.purchase_value || r.purchases_conversion_value || 0;
+    if (val > 0 && r.spend > 0) return val / r.spend;
     return 0;
   };
-  const withRoas = rows.filter(r => getRoas(r) > 0 && (r.spend || 0) > 0);
-  const sorted = [...withRoas].sort((a,b) => getRoas(b) - getRoas(a));
-  const topPerformers = sorted.slice(0,5).map(r => {
-    const parts = (r.ad_name||"").split("-").pop() || r.ad_name;
+  const withRoas = rows.filter(r => getRoas(r) > 0 && (r.spend||0) > 0);
+  const sorted = [...withRoas].sort((a,b) => getRoas(b)-getRoas(a));
+
+  const topPerformers = sorted.slice(0,8).map(r => {
+    const parsed = parseCreativeName(r.ad_name);
+    const hook = r.impressions > 0 ? (r.video_3_sec_watched_actions||0)/r.impressions : 0;
+    const hold = r.video_3_sec_watched_actions > 0 ? (r.video_thruplay_watched_actions||0)/r.video_3_sec_watched_actions : 0;
     return {
       ad_name: r.ad_name||"",
-      creative_name: parts,
+      creative_name: r.ad_name||"",
       spend: Math.round(r.spend||0),
       roas: Number(getRoas(r).toFixed(2)),
       ctr: Number((r.ctr||0).toFixed(2)),
-      format: (r.ad_name||"").toLowerCase().includes("video")?"Video":(r.ad_name||"").toLowerCase().includes("static")?"Static":"Catalog",
-      is_influencer: (r.ad_name||"").toLowerCase().includes("inf"),
-      is_ugc: (r.ad_name||"").toLowerCase().includes("ccp"),
+      purchases: Math.round(r.purchases||0),
+      format: parsed.format,
+      product: parsed.product,
+      contentType: parsed.contentType,
+      creator: parsed.creator,
+      cohort: parsed.cohort,
+      hook_rate: hook > 0 ? Number((hook*100).toFixed(1)) : null,
+      hold_rate: hold > 0 ? Number((hold*100).toFixed(1)) : null,
     };
   });
-  const fatigued = withRoas.filter(r=>r.spend>5000&&getRoas(r)<1.5).sort((a,b)=>b.spend-a.spend).slice(0,5).map(r=>({
-    ad_name:r.ad_name||"",creative_name:(r.ad_name||"").split("-").pop()||r.ad_name,spend:Math.round(r.spend||0),roas:Number(getRoas(r).toFixed(2))
-  }));
-  const avgRoas = arr => arr.length?(arr.reduce((s,r)=>s+getRoas(r),0)/arr.length).toFixed(2):0;
-  const vid = withRoas.filter(r=>(r.ad_name||"").toLowerCase().includes("video"));
-  const sta = withRoas.filter(r=>(r.ad_name||"").toLowerCase().includes("static"));
-  const inf = withRoas.filter(r=>(r.ad_name||"").toLowerCase().includes("inf"));
+
+  const fatigued = withRoas
+    .filter(r => r.spend>5000 && getRoas(r)<1.5)
+    .sort((a,b) => b.spend-a.spend).slice(0,5)
+    .map(r => {
+      const parsed = parseCreativeName(r.ad_name);
+      return { ad_name:r.ad_name||"", creative_name:r.ad_name||"", spend:Math.round(r.spend||0), roas:Number(getRoas(r).toFixed(2)), format:parsed.format, product:parsed.product, contentType:parsed.contentType };
+    });
+
+  const avgRoas = arr => arr.length ? Number((arr.reduce((s,r)=>s+getRoas(r),0)/arr.length).toFixed(2)) : 0;
+
+  // Format breakdown
+  const byFormat = {};
+  for (const r of withRoas) {
+    const k = parseCreativeName(r.ad_name).format;
+    if (!byFormat[k]) byFormat[k] = [];
+    byFormat[k].push(r);
+  }
+  const format_performance = Object.fromEntries(Object.entries(byFormat).map(([k,arr])=>
+    [k.toLowerCase(), { count:arr.length, avg_roas:avgRoas(arr), total_spend:Math.round(arr.reduce((s,r)=>s+(r.spend||0),0)) }]
+  ));
+
+  // Product breakdown
+  const byProduct = {};
+  for (const r of withRoas) {
+    const k = parseCreativeName(r.ad_name).product;
+    if (!byProduct[k]) byProduct[k] = [];
+    byProduct[k].push(r);
+  }
+  const product_performance = Object.entries(byProduct)
+    .map(([prod,arr]) => ({ product:prod, count:arr.length, avg_roas:avgRoas(arr), total_spend:Math.round(arr.reduce((s,r)=>s+(r.spend||0),0)) }))
+    .sort((a,b) => b.total_spend-a.total_spend);
+
+  // Content type breakdown
+  const byContentType = {};
+  for (const r of withRoas) {
+    const k = parseCreativeName(r.ad_name).contentType;
+    if (!byContentType[k]) byContentType[k] = [];
+    byContentType[k].push(r);
+  }
+  const content_type_performance = Object.entries(byContentType)
+    .map(([ct,arr]) => ({ type:ct, count:arr.length, avg_roas:avgRoas(arr), total_spend:Math.round(arr.reduce((s,r)=>s+(r.spend||0),0)) }))
+    .sort((a,b) => b.avg_roas-a.avg_roas);
+
   return {
-    top_performers:topPerformers, fatigued_angles:fatigued,
-    total_ads_analysed:withRoas.length, total_spend_analysed:Math.round(withRoas.reduce((s,r)=>s+(r.spend||0),0)),
-    format_performance:{video:{count:vid.length,avg_roas:avgRoas(vid)},static:{count:sta.length,avg_roas:avgRoas(sta)},influencer:{count:inf.length,avg_roas:avgRoas(inf)}},
-    best_roas:Number(getRoas(sorted[0]||{}).toFixed(2))||0, best_creative:sorted[0]?.ad_name||"",
+    top_performers: topPerformers,
+    fatigued_angles: fatigued,
+    total_ads_analysed: withRoas.length,
+    total_spend_analysed: Math.round(withRoas.reduce((s,r)=>s+(r.spend||0),0)),
+    format_performance,
+    product_performance,
+    content_type_performance,
+    best_roas: Number(getRoas(sorted[0]||{}).toFixed(2))||0,
+    best_creative: sorted[0]?.ad_name||"",
   };
+}
+
+// ─── CREATIVE SHEET INTELLIGENCE ─────────────────────────────
+
+async function parseCreativeSheet(file) {
+  const XLSX = await import("xlsx");
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  return rows.map(r => ({
+    adName:       String(r["AD Name"]      || r["Ad Name"]      || r["AD NAME"]      || "").trim(),
+    product:      String(r["Product"]      || "").trim(),
+    format:       String(r["Format"]       || "").trim(),
+    productTag:   String(r["Product Tag"]  || "").trim(),
+    contentType:  String(r["Content Type"] || "").trim(),
+    theme:        String(r["Theme"]        || "").trim(),
+    date:         String(r["Date"]         || "").trim(),
+    creativeLink: String(r["Creative Link"]|| "").trim(),
+    lpLink:       String(r["LP Link"]      || "").trim(),
+    primaryText:  String(r["Primary Text"] || "").trim(),
+    headlines:    String(r["Headlines"]    || "").trim(),
+  })).filter(r => r.adName);
+}
+
+function joinSheetWithWindsor(sheetRows, windsorRows) {
+  const sheetMap = new Map();
+  for (const r of sheetRows) sheetMap.set(r.adName.toLowerCase(), r);
+  const getRoas = r => r.website_purchase_roas || r.purchase_roas || r.omni_purchase_roas || r.roas
+    || (r.purchase_value > 0 && r.spend > 0 ? r.purchase_value / r.spend : 0) || 0;
+  return windsorRows
+    .map(w => {
+      const sheet = sheetMap.get((w.ad_name||"").toLowerCase());
+      if (!sheet) return null;
+      return {
+        adName:      w.ad_name,
+        roas:        getRoas(w),
+        spend:       w.spend || 0,
+        purchases:   w.purchases || 0,
+        ctr:         w.ctr || 0,
+        impressions: w.impressions || 0,
+        product:     sheet.product,
+        format:      sheet.format,
+        contentType: sheet.contentType,
+        theme:       sheet.theme,
+        creativeLink:sheet.creativeLink,
+        primaryText: sheet.primaryText,
+        headlines:   sheet.headlines,
+        productTag:  sheet.productTag,
+      };
+    })
+    .filter(r => r && r.roas > 0 && r.spend > 0)
+    .sort((a, b) => b.roas - a.roas);
+}
+
+async function analyzeCreativesWithVision(topRows) {
+  const results = [];
+  for (const row of topRows.slice(0, 10)) {
+    if (!row.creativeLink) continue;
+    try {
+      const imgRes = await fetch("/api/drive-image", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ driveUrl: row.creativeLink }),
+      });
+      if (!imgRes.ok) continue;
+      const { base64, mediaType, fileId } = await imgRes.json();
+      if (!base64) continue;
+      const tagRes = await fetch("/api/vision-tag", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64, mediaType, adName: row.adName, product: row.product, contentType: row.contentType }),
+      });
+      if (!tagRes.ok) continue;
+      const { tags } = await tagRes.json();
+      results.push({ ...row, visualTags: tags || {}, thumbUrl: `https://drive.google.com/thumbnail?id=${fileId}&sz=w400` });
+    } catch(e) { console.error("[Vision] failed for", row.adName, e.message); }
+  }
+  return results;
+}
+
+function computeVisualCorrelations(analysedRows, allJoinedRows) {
+  if (!analysedRows?.length) return null;
+  const avgRoasAll = allJoinedRows.length
+    ? allJoinedRows.reduce((s,r) => s+r.roas, 0) / allJoinedRows.length : 0;
+  const dims = ["person_type","text_style","background","hook_type","color_theme","composition"];
+  const correlations = {};
+  for (const dim of dims) {
+    const byTag = {};
+    for (const row of analysedRows) {
+      const tag = row.visualTags?.[dim]; if (!tag) continue;
+      if (!byTag[tag]) byTag[tag] = { roas:[], spend:0, count:0 };
+      byTag[tag].roas.push(row.roas); byTag[tag].spend += row.spend; byTag[tag].count++;
+    }
+    correlations[dim] = Object.entries(byTag).map(([tag,d]) => {
+      const avg = d.roas.reduce((s,v)=>s+v,0)/d.roas.length;
+      return { tag, avg_roas: Number(avg.toFixed(2)), count: d.count,
+        total_spend: Math.round(d.spend),
+        lift: avgRoasAll > 0 ? Number(((avg/avgRoasAll-1)*100).toFixed(0)) : 0 };
+    }).sort((a,b) => b.avg_roas - a.avg_roas);
+  }
+  return { correlations, top_creatives: analysedRows, total_analysed: analysedRows.length, avg_roas_all: Number(avgRoasAll.toFixed(2)) };
 }
 
 // ─── READ URLs + EXTRACT USPs ─────────────────────────────────
@@ -661,14 +835,16 @@ EACH ICP OBJECT:
 "WINDSOR AI — REAL META AD PERFORMANCE (Last 30 days):\n" +
 "TOP PERFORMING CREATIVES:\n" +
 (inputs.windsorAngles.top_performers||[]).map((p,i)=>
-  (i+1)+". "+p.creative_name+" — "+p.roas+"x ROAS, ₹"+p.spend.toLocaleString()+" spend, "+p.ctr+"% CTR ["+p.format+(p.is_influencer?" INF":"")+(p.is_ugc?" UGC":"")+"]"
+  (i+1)+". "+p.creative_name.slice(0,80)+" — "+p.roas+"x ROAS, ₹"+p.spend.toLocaleString()+" spend, "+p.purchases+" orders, "+p.ctr+"% CTR ["+p.format+" | "+p.product+" | "+p.contentType+(p.creator?" | "+p.creator:"")+"]"+(p.hook_rate!=null?" Hook:"+p.hook_rate+"% Hold:"+p.hold_rate+"%":"")
 ).join("\n") + "\n" +
 "FATIGUED ANGLES (do NOT repeat):\n" +
 (inputs.windsorAngles.fatigued_angles||[]).map((f,i)=>
-  (i+1)+". "+f.creative_name+" — "+f.roas+"x ROAS on ₹"+f.spend.toLocaleString()+" spend"
+  (i+1)+". "+f.creative_name.slice(0,80)+" — "+f.roas+"x ROAS on ₹"+f.spend.toLocaleString()+" spend ["+f.format+" | "+f.product+" | "+f.contentType+"]"
 ).join("\n") + "\n" +
-"FORMAT: Video avg "+(inputs.windsorAngles.format_performance?.video?.avg_roas||"—")+"x ROAS | Static avg "+(inputs.windsorAngles.format_performance?.static?.avg_roas||"—")+"x ROAS\n" +
-"Map each ICP proven_formula to a top performer. Flag fatigued angles explicitly.\n"
+"FORMAT BREAKDOWN: "+Object.entries(inputs.windsorAngles.format_performance||{}).map(([k,v])=>k+": "+v.avg_roas+"x avg ROAS, "+v.count+" ads, ₹"+Math.round((v.total_spend||0)/1000)+"K").join(" | ")+"\n"+
+"PRODUCT BREAKDOWN:\n"+(inputs.windsorAngles.product_performance||[]).map(p=>p.product+": "+p.avg_roas+"x ROAS, "+p.count+" ads, ₹"+Math.round(p.total_spend/1000)+"K spend").join("\n")+"\n"+
+"CONTENT TYPE: "+(inputs.windsorAngles.content_type_performance||[]).map(c=>c.type+": "+c.avg_roas+"x ROAS, "+c.count+" ads").join(" | ")+"\n"+
+"Map each ICP proven_formula to a real top performer. Flag fatigued angles explicitly. Use product/content-type data to decide which angle to double down on.\n"
 ) : "No Windsor data — generate proven_formula from research intelligence only.\n";
 
   const metaAdsContext = inputs.metaAdsInsights ? (
@@ -869,12 +1045,22 @@ function Step1Screen({onNext}) {
   const [otherUrls,    setOtherUrls]    = useState([""]);
   const [winsorApiKey, setWindsorApiKey]= useState("");
   const [competitorNames, setCompetitorNames]= useState("");
+  const [creativeSheetRows, setCreativeSheetRows] = useState([]);
+  const [sheetLoaded, setSheetLoaded] = useState(false);
   const [errors,       setErrors]       = useState([]);
 
   const baseReady = brandName.trim()&&brandUrl.trim()&&productUrl.trim();
 
+  const handleSheetUpload = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try {
+      const rows = await parseCreativeSheet(file);
+      setCreativeSheetRows(rows); setSheetLoaded(true);
+    } catch(err) { alert("Failed to parse sheet: "+err.message); }
+  };
+
   const handleNext = () => {
-    const data = {brandName,brandUrl,productUrl,mediaKeywords,amazonUrls,myntraUrl,youtubeUrls,instagramUrls,otherUrls,winsorApiKey,competitorNames};
+    const data = {brandName,brandUrl,productUrl,mediaKeywords,amazonUrls,myntraUrl,youtubeUrls,instagramUrls,otherUrls,winsorApiKey,competitorNames,creativeSheetRows};
     const errs = validateUrls(data);
     if(errs.length>0){setErrors(errs);return;}
     setErrors([]);
@@ -945,6 +1131,17 @@ function Step1Screen({onNext}) {
             <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:T.green,letterSpacing:"0.12em",marginBottom:"6px"}}>WINDSOR AI — META AD PERFORMANCE (OPTIONAL)</div>
             <p style={{fontSize:"11px",color:T.muted,margin:"0 0 10px",lineHeight:"1.6"}}>Paste your Windsor API key to pull real CTR, ROAS and spend per creative. Enables the Proven Formula section in each ICP. Get it from windsor.ai → Settings → API Key.</p>
             <InputField label="Windsor API Key" value={winsorApiKey} onChange={setWindsorApiKey} placeholder="wai_xxxxxxxxxxxxxxxxxxxxxxxx"/>
+          </div>
+
+          <div style={{background:"rgba(180,120,255,0.06)",border:"1px solid rgba(180,120,255,0.2)",borderRadius:"6px",padding:"14px 16px"}}>
+            <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:"#b39ddb",letterSpacing:"0.12em",marginBottom:"6px"}}>CREATIVE SHEET — VISION AI ANALYSIS (OPTIONAL)</div>
+            <p style={{fontSize:"11px",color:T.muted,margin:"0 0 10px",lineHeight:"1.6"}}>Upload the Blissclub creative sheet (.xlsx). Joins with Windsor on AD Name → fetches Drive thumbnails → Vision AI tags top 10 creatives → shows which visual patterns correlate with high ROAS.</p>
+            <label style={{display:"block",cursor:"pointer"}}>
+              <div style={{border:"1px dashed rgba(180,120,255,0.3)",borderRadius:"6px",padding:"14px",textAlign:"center",fontFamily:"'DM Mono',monospace",fontSize:"11px",color:sheetLoaded?"#b39ddb":T.muted,transition:"all 0.2s"}}>
+                {sheetLoaded ? `✓ ${creativeSheetRows.length} creatives loaded` : "Click to upload .xlsx / .xls / .csv"}
+              </div>
+              <input type="file" accept=".xlsx,.xls,.csv" style={{display:"none"}} onChange={handleSheetUpload}/>
+            </label>
           </div>
 
           <div style={{background:"rgba(100,160,255,0.06)",border:"1px solid rgba(100,160,255,0.2)",borderRadius:"6px",padding:"14px 16px"}}>
@@ -1831,8 +2028,12 @@ function WindsorPanel({data}) {
   const top = data.top_performers||[];
   const fatigued = data.fatigued_angles||[];
   const fmt = data.format_performance||{};
+  const fmtKeys = Object.keys(fmt);
+  const products = data.product_performance||[];
+  const ctypes = data.content_type_performance||[];
   return (
     <div style={{display:"flex",flexDirection:"column",gap:"20px"}}>
+      {/* Summary stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:"10px"}}>
         <div style={{background:"rgba(255,255,255,0.03)",border:"1px solid "+T.cardBorder,borderRadius:"6px",padding:"14px"}}>
           <div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted,marginBottom:"6px"}}>ADS ANALYSED</div>
@@ -1847,45 +2048,207 @@ function WindsorPanel({data}) {
           <div style={{fontSize:"26px",fontWeight:"500",color:T.green}}>{data.best_roas}x</div>
         </div>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:"10px"}}>
-        {[{label:"Video",d:fmt.video},{label:"Static",d:fmt.static},{label:"Influencer",d:fmt.influencer}].map(({label,d})=>(
-          <div key={label} style={{background:T.card,border:"1px solid "+T.cardBorder,borderRadius:"6px",padding:"12px"}}>
-            <div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted,marginBottom:"6px"}}>{label.toUpperCase()}</div>
-            <div style={{fontSize:"18px",fontWeight:"500",color:T.ink,marginBottom:"2px"}}>{d?.avg_roas||"—"}x</div>
-            <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:T.muted}}>{d?.count||0} ads</div>
-          </div>
-        ))}
-      </div>
+
+      {/* Format breakdown */}
+      {fmtKeys.length>0&&(
+        <div style={{display:"grid",gridTemplateColumns:"repeat("+Math.min(fmtKeys.length,4)+",minmax(0,1fr))",gap:"10px"}}>
+          {fmtKeys.map(k=>(
+            <div key={k} style={{background:T.card,border:"1px solid "+T.cardBorder,borderRadius:"6px",padding:"12px"}}>
+              <div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted,marginBottom:"6px"}}>{k.toUpperCase()}</div>
+              <div style={{fontSize:"18px",fontWeight:"500",color:T.ink,marginBottom:"2px"}}>{fmt[k]?.avg_roas||"—"}x</div>
+              <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:T.muted}}>{fmt[k]?.count||0} ads · ₹{Math.round((fmt[k]?.total_spend||0)/1000)}K</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Product + Content type breakdown side by side */}
+      {(products.length>0||ctypes.length>0)&&(
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px"}}>
+          {products.length>0&&(
+            <div style={{background:T.card,border:"1px solid "+T.cardBorder,borderRadius:"8px",padding:"16px"}}>
+              <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:T.muted,letterSpacing:"0.1em",marginBottom:"12px"}}>BY PRODUCT</div>
+              <div style={{display:"flex",flexDirection:"column",gap:"6px"}}>
+                {products.slice(0,6).map((p,i)=>(
+                  <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 50px 50px",gap:"8px",alignItems:"center",fontSize:"12px"}}>
+                    <div style={{color:T.ink,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.product}</div>
+                    <div style={{textAlign:"right",color:T.green,fontWeight:"500"}}>{p.avg_roas}x</div>
+                    <div style={{textAlign:"right",color:T.muted,fontFamily:"'DM Mono',monospace",fontSize:"10px"}}>₹{Math.round(p.total_spend/1000)}K</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {ctypes.length>0&&(
+            <div style={{background:T.card,border:"1px solid "+T.cardBorder,borderRadius:"8px",padding:"16px"}}>
+              <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:T.muted,letterSpacing:"0.1em",marginBottom:"12px"}}>BY CONTENT TYPE</div>
+              <div style={{display:"flex",flexDirection:"column",gap:"6px"}}>
+                {ctypes.map((c,i)=>(
+                  <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 50px 50px",gap:"8px",alignItems:"center",fontSize:"12px"}}>
+                    <div style={{color:T.ink}}>{c.type}</div>
+                    <div style={{textAlign:"right",color:T.green,fontWeight:"500"}}>{c.avg_roas}x</div>
+                    <div style={{textAlign:"right",color:T.muted,fontFamily:"'DM Mono',monospace",fontSize:"10px"}}>{c.count} ads</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Top performers */}
       <div style={{background:T.card,border:"1px solid "+T.cardBorder,borderRadius:"8px",padding:"18px"}}>
         <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:T.green,letterSpacing:"0.12em",marginBottom:"14px"}}>TOP PERFORMERS — LAST 30 DAYS</div>
         <div style={{display:"flex",flexDirection:"column",gap:"8px"}}>
           {top.map((p,i)=>(
-            <div key={i} style={{display:"grid",gridTemplateColumns:"24px 1fr 80px 70px 60px",gap:"12px",alignItems:"center",padding:"10px 12px",background:"rgba(76,175,80,0.04)",borderRadius:"6px",border:"1px solid rgba(76,175,80,0.1)"}}>
-              <div style={{fontFamily:"'DM Mono',monospace",fontSize:"11px",color:T.green,fontWeight:"600"}}>#{i+1}</div>
-              <div>
-                <div style={{fontSize:"12px",color:T.ink,marginBottom:"2px",lineHeight:"1.3"}}>{p.creative_name.slice(0,60)}{p.creative_name.length>60?"...":""}</div>
-                <div style={{display:"flex",gap:"6px"}}>
-                  <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 6px",borderRadius:"3px",background:"rgba(255,255,255,0.06)",color:T.muted}}>{p.format}</span>
-                  {p.is_influencer&&<span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 6px",borderRadius:"3px",background:"rgba(100,160,255,0.1)",color:T.blue}}>INF</span>}
-                  {p.is_ugc&&<span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 6px",borderRadius:"3px",background:"rgba(200,75,47,0.1)",color:T.accent}}>UGC</span>}
+            <div key={i} style={{padding:"10px 12px",background:"rgba(76,175,80,0.04)",borderRadius:"6px",border:"1px solid rgba(76,175,80,0.1)"}}>
+              <div style={{display:"grid",gridTemplateColumns:"24px 1fr 70px 60px 60px 60px",gap:"10px",alignItems:"center"}}>
+                <div style={{fontFamily:"'DM Mono',monospace",fontSize:"11px",color:T.green,fontWeight:"600"}}>#{i+1}</div>
+                <div style={{overflow:"hidden"}}>
+                  <div style={{fontSize:"11px",color:T.ink,marginBottom:"4px",lineHeight:"1.3",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.creative_name}</div>
+                  <div style={{display:"flex",gap:"4px",flexWrap:"wrap"}}>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 5px",borderRadius:"3px",background:"rgba(255,255,255,0.06)",color:T.muted}}>{p.format}</span>
+                    {p.product!=="Other"&&<span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 5px",borderRadius:"3px",background:"rgba(255,255,255,0.04)",color:T.muted}}>{p.product}</span>}
+                    {p.contentType!=="Tactical"&&<span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 5px",borderRadius:"3px",background:"rgba(100,160,255,0.08)",color:T.blue}}>{p.contentType}</span>}
+                    {p.creator&&<span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 5px",borderRadius:"3px",background:"rgba(200,150,255,0.08)",color:"#b39ddb"}}>{p.creator}</span>}
+                  </div>
                 </div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:"15px",fontWeight:"500",color:T.green}}>{p.roas}x</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>ROAS</div></div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:"12px",color:T.ink}}>{p.purchases}</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>orders</div></div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:"12px",color:T.ink}}>{p.ctr}%</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>CTR</div></div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:"12px",color:T.muted}}>₹{(p.spend/1000).toFixed(0)}K</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>spend</div></div>
               </div>
-              <div style={{textAlign:"right"}}><div style={{fontSize:"15px",fontWeight:"500",color:T.green}}>{p.roas}x</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>ROAS</div></div>
-              <div style={{textAlign:"right"}}><div style={{fontSize:"13px",color:T.ink}}>{p.ctr}%</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>CTR</div></div>
-              <div style={{textAlign:"right"}}><div style={{fontSize:"12px",color:T.muted}}>₹{(p.spend/1000).toFixed(0)}K</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>spend</div></div>
+              {(p.hook_rate!=null)&&(
+                <div style={{display:"flex",gap:"12px",marginTop:"6px",paddingTop:"6px",borderTop:"1px solid rgba(255,255,255,0.04)"}}>
+                  <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>HOOK <span style={{color:T.ink}}>{p.hook_rate}%</span></span>
+                  <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>HOLD <span style={{color:T.ink}}>{p.hold_rate}%</span></span>
+                </div>
+              )}
             </div>
           ))}
         </div>
       </div>
+
+      {/* Fatigued angles */}
       {fatigued.length>0&&(
         <div style={{background:T.card,border:"1px solid rgba(255,100,80,0.15)",borderRadius:"8px",padding:"18px"}}>
           <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:T.red,letterSpacing:"0.12em",marginBottom:"14px"}}>FATIGUED / KILLED ANGLES — DO NOT REPEAT</div>
           <div style={{display:"flex",flexDirection:"column",gap:"8px"}}>
             {fatigued.map((f,i)=>(
-              <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 80px 70px",gap:"12px",alignItems:"center",padding:"10px 12px",background:"rgba(255,100,80,0.04)",borderRadius:"6px",border:"1px solid rgba(255,100,80,0.08)"}}>
-                <div style={{fontSize:"12px",color:T.muted,lineHeight:"1.3"}}>{f.creative_name.slice(0,70)}</div>
+              <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 60px 60px 60px",gap:"10px",alignItems:"center",padding:"10px 12px",background:"rgba(255,100,80,0.04)",borderRadius:"6px",border:"1px solid rgba(255,100,80,0.08)"}}>
+                <div>
+                  <div style={{fontSize:"11px",color:T.muted,lineHeight:"1.3",marginBottom:"3px"}}>{f.creative_name.slice(0,70)}</div>
+                  <div style={{display:"flex",gap:"4px"}}>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 5px",borderRadius:"3px",background:"rgba(255,255,255,0.04)",color:T.muted}}>{f.format}</span>
+                    {f.product!=="Other"&&<span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 5px",borderRadius:"3px",background:"rgba(255,255,255,0.04)",color:T.muted}}>{f.product}</span>}
+                  </div>
+                </div>
                 <div style={{textAlign:"right"}}><div style={{fontSize:"13px",color:"rgba(255,100,80,0.8)"}}>{f.roas}x</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>ROAS</div></div>
                 <div style={{textAlign:"right"}}><div style={{fontSize:"12px",color:T.muted}}>₹{(f.spend/1000).toFixed(0)}K</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>burned</div></div>
+                <div style={{textAlign:"right"}}><div style={{fontSize:"11px",color:T.muted}}>{f.contentType}</div></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── CREATIVE INTEL PANEL ─────────────────────────────────────
+
+const DIM_LABELS = {
+  person_type: "Person Type", text_style: "Text Style", background: "Background",
+  hook_type: "Hook Type", color_theme: "Color Theme", composition: "Composition",
+};
+
+function CreativeIntelPanel({ data }) {
+  const [activeDim, setActiveDim] = useState("hook_type");
+  if (!data) return <div style={{padding:"40px",textAlign:"center",color:T.muted,fontFamily:"'DM Mono',monospace",fontSize:"12px"}}>No creative intel — upload the creative sheet in Step 1.</div>;
+  const { correlations, top_creatives, total_analysed, avg_roas_all } = data;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:"24px"}}>
+      {/* Summary */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:"10px"}}>
+        {[
+          {label:"CREATIVES ANALYSED", value:total_analysed},
+          {label:"AVG ROAS (joined)", value:avg_roas_all+"x"},
+          {label:"VISUAL DIMENSIONS", value:Object.keys(correlations||{}).length},
+        ].map(({label,value})=>(
+          <div key={label} style={{background:"rgba(255,255,255,0.03)",border:"1px solid "+T.cardBorder,borderRadius:"6px",padding:"14px"}}>
+            <div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted,marginBottom:"6px"}}>{label}</div>
+            <div style={{fontSize:"24px",fontWeight:"500",color:"#b39ddb"}}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Dimension selector */}
+      <div style={{background:T.card,border:"1px solid "+T.cardBorder,borderRadius:"8px",padding:"18px"}}>
+        <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:"#b39ddb",letterSpacing:"0.12em",marginBottom:"14px"}}>VISUAL PATTERN CORRELATIONS — WHAT DRIVES ROAS</div>
+        <div style={{display:"flex",gap:"6px",flexWrap:"wrap",marginBottom:"18px"}}>
+          {Object.keys(correlations||{}).map(dim=>(
+            <button key={dim} onClick={()=>setActiveDim(dim)} style={{
+              fontFamily:"'DM Mono',monospace",fontSize:"10px",padding:"5px 12px",borderRadius:"20px",cursor:"pointer",
+              background:activeDim===dim?"rgba(180,120,255,0.15)":"rgba(255,255,255,0.04)",
+              color:activeDim===dim?"#b39ddb":T.muted,
+              border:`1px solid ${activeDim===dim?"rgba(180,120,255,0.4)":T.cardBorder}`,
+            }}>{DIM_LABELS[dim]||dim}</button>
+          ))}
+        </div>
+        {correlations?.[activeDim]?.length > 0 && (
+          <div style={{display:"flex",flexDirection:"column",gap:"8px"}}>
+            {correlations[activeDim].map((row,i)=>{
+              const isTop = row.lift >= 10;
+              const isNeg = row.lift < 0;
+              return (
+                <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 70px 70px 80px 70px",gap:"10px",alignItems:"center",padding:"10px 12px",borderRadius:"6px",background:isTop?"rgba(180,120,255,0.05)":"rgba(255,255,255,0.02)",border:`1px solid ${isTop?"rgba(180,120,255,0.15)":T.cardBorder}`}}>
+                  <div style={{fontSize:"13px",color:T.ink,fontWeight:isTop?"500":"400"}}>{row.tag.replace(/_/g," ")}</div>
+                  <div style={{textAlign:"right"}}><div style={{fontSize:"16px",fontWeight:"500",color:"#b39ddb"}}>{row.avg_roas}x</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>ROAS</div></div>
+                  <div style={{textAlign:"right"}}><div style={{fontSize:"13px",color:isTop?T.green:isNeg?"rgba(255,100,80,0.8)":T.muted,fontWeight:"500"}}>{row.lift>0?"+":""}{row.lift}%</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>vs avg</div></div>
+                  <div style={{textAlign:"right"}}><div style={{fontSize:"12px",color:T.muted}}>₹{Math.round(row.total_spend/1000)}K</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>spend</div></div>
+                  <div style={{textAlign:"right"}}><div style={{fontSize:"12px",color:T.muted}}>{row.count}</div><div style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>ads</div></div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Top creative cards */}
+      {top_creatives?.length > 0 && (
+        <div style={{background:T.card,border:"1px solid "+T.cardBorder,borderRadius:"8px",padding:"18px"}}>
+          <div style={{fontFamily:"'DM Mono',monospace",fontSize:"10px",color:"#b39ddb",letterSpacing:"0.12em",marginBottom:"14px"}}>TOP 10 ANALYSED CREATIVES</div>
+          <div style={{display:"flex",flexDirection:"column",gap:"12px"}}>
+            {top_creatives.map((c,i)=>(
+              <div key={i} style={{display:"grid",gridTemplateColumns:"80px 1fr",gap:"14px",alignItems:"start",padding:"12px",borderRadius:"6px",border:"1px solid "+T.cardBorder,background:"rgba(255,255,255,0.02)"}}>
+                {/* Thumbnail */}
+                <div style={{width:"80px",height:"80px",borderRadius:"4px",overflow:"hidden",background:"rgba(255,255,255,0.05)",flexShrink:0}}>
+                  {c.thumbUrl
+                    ? <img src={c.thumbUrl} alt="" style={{width:"100%",height:"100%",objectFit:"cover"}} onError={e=>{e.target.style.display="none";}}/>
+                    : <div style={{width:"100%",height:"100%",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'DM Mono',monospace",fontSize:"9px",color:T.muted}}>NO IMG</div>
+                  }
+                </div>
+                <div>
+                  <div style={{fontSize:"11px",color:T.ink,marginBottom:"6px",lineHeight:"1.4"}}>{c.adName}</div>
+                  <div style={{display:"flex",gap:"6px",marginBottom:"8px",flexWrap:"wrap"}}>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"2px 6px",borderRadius:"3px",background:"rgba(180,120,255,0.12)",color:"#b39ddb"}}>{c.roas}x ROAS</span>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"2px 6px",borderRadius:"3px",background:"rgba(255,255,255,0.05)",color:T.muted}}>₹{Math.round(c.spend/1000)}K</span>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"2px 6px",borderRadius:"3px",background:"rgba(255,255,255,0.05)",color:T.muted}}>{c.format}</span>
+                    <span style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"2px 6px",borderRadius:"3px",background:"rgba(255,255,255,0.05)",color:T.muted}}>{c.contentType}</span>
+                  </div>
+                  {/* Visual tags */}
+                  {c.visualTags && Object.keys(c.visualTags).length > 0 && (
+                    <div style={{display:"flex",gap:"4px",flexWrap:"wrap"}}>
+                      {Object.entries(c.visualTags).map(([k,v])=>(
+                        <span key={k} style={{fontFamily:"'DM Mono',monospace",fontSize:"9px",padding:"1px 5px",borderRadius:"3px",background:"rgba(180,120,255,0.06)",color:"rgba(179,157,219,0.7)",border:"1px solid rgba(180,120,255,0.15)"}}>
+                          {k.replace(/_/g," ")}: {v.replace(/_/g," ")}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {c.primaryText && <div style={{marginTop:"8px",fontSize:"11px",color:T.muted,lineHeight:"1.5",fontStyle:"italic"}}>"{c.primaryText.slice(0,120)}{c.primaryText.length>120?"...":""}"</div>}
+                </div>
               </div>
             ))}
           </div>
@@ -1897,7 +2260,7 @@ function WindsorPanel({data}) {
 
 // ─── BRIEF OUTPUT ─────────────────────────────────────────────
 
-function BriefOutput({data, researchData, windsorAngles, metaAdsInsights, onReset}) {
+function BriefOutput({data, researchData, windsorAngles, metaAdsInsights, creativeIntel, onReset}) {
   const [activeTab, setActiveTab] = useState("research");
   const icps = data?.icps || [];
 
@@ -1924,8 +2287,9 @@ function BriefOutput({data, researchData, windsorAngles, metaAdsInsights, onRese
   }
 
   const OUTPUT_TABS = [
-    {key:"research", label:"Research Intelligence"},
-    {key:"windsor",  label:"Ad Performance"},
+    {key:"research",        label:"Research Intelligence"},
+    {key:"windsor",         label:"Ad Performance"},
+    ...(creativeIntel ? [{key:"creative_intel", label:"Creative Intel ✦"}] : []),
     ...icps.map((icp,i)=>({key:"icp_"+i, label:icp.profile?.name||"ICP "+(i+1)})),
   ];
 
@@ -1970,8 +2334,9 @@ function BriefOutput({data, researchData, windsorAngles, metaAdsInsights, onRese
 
       <div style={{maxWidth:"1040px",margin:"0 auto",padding:"32px 40px 80px"}}>
 
-        {activeTab==="research" && <ResearchIntelligenceTab data={researchData}/>}
-        {activeTab==="windsor" && <WindsorPanel data={windsorAngles}/>}
+        {activeTab==="research"       && <ResearchIntelligenceTab data={researchData}/>}
+        {activeTab==="windsor"        && <WindsorPanel data={windsorAngles}/>}
+        {activeTab==="creative_intel" && <CreativeIntelPanel data={creativeIntel}/>}
 
         {icps.map((icp,i)=>(
           activeTab==="icp_"+i && (
@@ -2022,6 +2387,7 @@ export default function App() {
   const [windsorAngles,setWindsorAngles]= useState(null);
   const [windsorLoaded,setWindsorLoaded]= useState(false);
   const [metaAdsData,  setMetaAdsData]  = useState(null);
+  const [creativeIntel,setCreativeIntel]= useState(null);
   const [progress,     setProgress]     = useState(defaultProgress);
   const [liveSignals,  setLiveSignals]  = useState([]);
   const [dataPoints,   setDataPoints]   = useState({});
@@ -2066,6 +2432,21 @@ export default function App() {
         setWindsorLoaded(true);
         mark("windsor","done");
       } else { mark("windsor","failed"); }
+
+      // Creative sheet × Windsor join → Vision AI tagging
+      mark("creative_intel","running");
+      let creativeIntelData = null;
+      if (allInputs.creativeSheetRows?.length > 0 && windsorRaw?.length > 0) {
+        try {
+          const joined = joinSheetWithWindsor(allInputs.creativeSheetRows, windsorRaw);
+          if (joined.length > 0) {
+            const analysed = await analyzeCreativesWithVision(joined);
+            creativeIntelData = computeVisualCorrelations(analysed, joined);
+            setCreativeIntel(creativeIntelData);
+            mark("creative_intel","done");
+          } else { mark("creative_intel","failed"); }
+        } catch(e) { console.error("Creative intel error:",e); mark("creative_intel","failed"); }
+      } else { mark("creative_intel", allInputs.creativeSheetRows?.length > 0 ? "failed" : "pending"); }
 
       // Meta Ads Library step
       mark("meta_ads","running");
@@ -2175,7 +2556,7 @@ export default function App() {
       {screen==="step1"  &&<Step1Screen onNext={data=>{setUrlData(data);setScreen("step2");}}/>}
       {screen==="step2"  &&<Step2Screen urlData={urlData} onGenerate={handleGenerate} onBack={()=>setScreen("step1")}/>}
       {screen==="loading"&&<LoadingScreen brand={urlData?.brandName} progress={progress} liveSignals={liveSignals} dataPoints={dataPoints} windsorLoaded={windsorLoaded}/>}
-      {screen==="output" &&<BriefOutput data={briefData} researchData={researchData} windsorAngles={windsorAngles} metaAdsInsights={metaAdsData} onReset={()=>{setBriefData(null);setResearchData(null);setProgress(defaultProgress);setLiveSignals([]);setDataPoints({});setScreen("step1");}}/>}
+      {screen==="output" &&<BriefOutput data={briefData} researchData={researchData} windsorAngles={windsorAngles} metaAdsInsights={metaAdsData} creativeIntel={creativeIntel} onReset={()=>{setBriefData(null);setResearchData(null);setCreativeIntel(null);setProgress(defaultProgress);setLiveSignals([]);setDataPoints({});setScreen("step1");}}/>}
     </div>
   );
 }
